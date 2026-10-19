@@ -1,0 +1,55 @@
+name: GBPJPY - Alertas Telegram
+
+on:
+  schedule:
+    - cron: '8,28,48 * * 1-5'
+    - cron: '8,28,48 21-23 * * 0'
+  workflow_dispatch:
+    inputs:
+      test_telegram:
+        description: 'Enviar mensagem de teste'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gbpjpy-alertas
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Instalar dependencias
+        run: pip install -r requirements-monitor.txt
+      - name: Analisar e avisar
+        env:
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TEST_TELEGRAM: ${{ inputs.test_telegram }}
+        run: |
+          if [ "$TEST_TELEGRAM" = "true" ]; then
+            python alerts.py --test-telegram
+          else
+            python alerts.py
+          fi
+      - name: Guardar sinais enviados
+        if: success()
+        run: |
+          if [ -f .state/last_signals.json ]; then
+            git add .state/last_signals.json
+            if ! git diff --cached --quiet; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -m "Atualizar sinais enviados"
+              git push
+            fi
+          fi
