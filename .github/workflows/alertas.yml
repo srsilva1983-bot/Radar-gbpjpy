@@ -2,7 +2,7 @@ name: GBPJPY - Alertas Telegram
 
 on:
   schedule:
-    - cron: '8,28,48 * * 1-5'
+    - cron: '8,28,48 *** 1-5'
     - cron: '8,28,48 21-23 * * 0'
   workflow_dispatch:
     inputs:
