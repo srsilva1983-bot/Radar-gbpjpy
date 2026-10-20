@@ -1,4 +1,4 @@
-"""Painel web de oportunidades GBP/JPY (dados Twelve Data, velas fechadas)."""
+"""Painel web de oportunidades GBP/JPY e EUR/USD (Twelve Data, velas fechadas)."""
 from __future__ import annotations
 import os
 from datetime import datetime, timezone
@@ -10,10 +10,10 @@ import streamlit as st
 from datafeed import get_candles, DataFeedError
 from strategy import (
     calculate_signals, aggregate_30m, last_closed_candles, recent_opportunities,
-    fmt_price, format_lisbon, LISBON,
+    fmt_price, format_lisbon, LISBON, PIPS,
 )
 
-st.set_page_config(page_title='GBP/JPY · Radar FX', page_icon='📈', layout='wide', initial_sidebar_state='collapsed')
+st.set_page_config(page_title='GBP/JPY + EUR/USD · Radar FX', page_icon='📈', layout='wide', initial_sidebar_state='collapsed')
 
 CSS = '''
 <style>
@@ -48,16 +48,16 @@ def get_key() -> str:
 
 
 @st.cache_data(ttl=180, show_spinner=False)
-def load_quotes(key: str, interval: str, outputsize: int) -> pd.DataFrame:
-    return get_candles(key, interval, outputsize)
+def load_quotes(key: str, interval: str, outputsize: int, symbol: str) -> pd.DataFrame:
+    return get_candles(key, interval, outputsize, symbol=symbol)
 
 
-def draw_chart(data: pd.DataFrame, title: str, show_signals: bool = False):
+def draw_chart(data: pd.DataFrame, title: str, show_signals: bool = False, symbol: str = 'GBP/JPY'):
     display = data.tail(160)
     fig = make_subplots(rows=2, cols=1, row_heights=[0.78, 0.22], shared_xaxes=True, vertical_spacing=0.045)
     fig.add_trace(go.Candlestick(
         x=display.index, open=display.open, high=display.high, low=display.low, close=display.close,
-        name='GBP/JPY', increasing_line_color='#50e3bd', decreasing_line_color='#fd6f87',
+        name=symbol, increasing_line_color='#50e3bd', decreasing_line_color='#fd6f87',
     ), row=1, col=1)
     if 'ema20' in display:
         fig.add_trace(go.Scatter(x=display.index, y=display.ema20, mode='lines',
@@ -96,9 +96,10 @@ def draw_chart(data: pd.DataFrame, title: str, show_signals: bool = False):
     st.plotly_chart(fig, use_container_width=True, config={'displaylogo': False, 'scrollZoom': False})
 
 
-st.markdown('''<div class="hero"><div class="eyebrow">RADAR FX · OPORTUNIDADES TÉCNICAS</div>
-<div class="hero-title">GBP / JPY <span style="color:#67dabd">— Monitor online</span></div>
-<div class="hero-sub">Sinais em velas de 15 e 30 minutos · Confirmação da tendência na 1 hora · Alertas Telegram</div></div>''', unsafe_allow_html=True)
+symbol = st.selectbox('💱 Escolhe o par de moedas', ['GBP/JPY', 'EUR/USD'], index=0)
+st.markdown(f'''<div class="hero"><div class="eyebrow">RADAR FX · OPORTUNIDADES TÉCNICAS</div>
+<div class="hero-title">{symbol} <span style="color:#67dabd">— Monitor online</span></div>
+<div class="hero-sub">Compra e venda · Velas de 15 e 30 minutos · Tendência de 1 hora · Alertas Telegram</div></div>''', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header('⚙️ Configurações')
@@ -123,10 +124,10 @@ if not key:
 @st.fragment(run_every='10min')
 def render_dashboard():
     try:
-        with st.spinner('A consultar as velas GBP/JPY...'):
-            raw = load_quotes(key, '15min', 1500)
-            d15 = calculate_signals(last_closed_candles(raw, 15), minutes=15)
-            d30 = calculate_signals(aggregate_30m(last_closed_candles(raw, 15)), minutes=30)
+        with st.spinner(f'A consultar as velas {symbol}...'):
+            raw = load_quotes(key, '15min', 1500, symbol)
+            d15 = calculate_signals(last_closed_candles(raw, 15), minutes=15, symbol=symbol)
+            d30 = calculate_signals(aggregate_30m(last_closed_candles(raw, 15)), minutes=30, symbol=symbol)
             is_30m = interval_selection == '30 minutos'
             d = d30 if is_30m else d15
             minutes = 30 if is_30m else 15
@@ -147,23 +148,23 @@ def render_dashboard():
         st.warning('Dados sem atualização recente. O mercado pode estar fechado ou o fornecedor pode estar atrasado. Não uses estes valores para entrar agora.')
 
     a,b,c,e = st.columns(4)
-    a.metric(f'Último fecho {minutes}m', f'{last.close:.3f} JPY')
+    a.metric(f'Último fecho {minutes}m', f'{fmt_price(last.close, symbol)} {symbol.split("/")[1]}')
     b.metric('Tendência 1h', str(last.trend))
     c.metric(f'RSI {minutes}m', f'{last.rsi:.1f}')
-    e.metric(f'ATR {minutes}m', f'{last.atr / 0.01:.1f} pips')
+    e.metric(f'ATR {minutes}m', f'{last.atr / PIPS[symbol]:.1f} pips')
 
     if delayed:
         title, cls, desc = '⏸️ FORA DE TEMPO', 'wait', 'Não emitir indicação de entrada com preços desatualizados.'
     elif last.signal == 'COMPRA':
-        title, cls, desc = '🟢 SINAL DE COMPRA', 'buy', f'Entrada de referência {fmt_price(last.entry)} · Stop {fmt_price(last.stop)} · Alvo 1 {fmt_price(last.target1)} · Alvo 2 {fmt_price(last.target2)}'
+        title, cls, desc = '🟢 SINAL DE COMPRA', 'buy', f'Entrada de referência {fmt_price(last.entry, symbol)} · Stop {fmt_price(last.stop, symbol)} · Alvo 1 {fmt_price(last.target1, symbol)} · Alvo 2 {fmt_price(last.target2, symbol)}'
     elif last.signal == 'VENDA':
-        title, cls, desc = '🔴 SINAL DE VENDA', 'sell', f'Entrada de referência {fmt_price(last.entry)} · Stop {fmt_price(last.stop)} · Alvo 1 {fmt_price(last.target1)} · Alvo 2 {fmt_price(last.target2)}'
+        title, cls, desc = '🔴 SINAL DE VENDA', 'sell', f'Entrada de referência {fmt_price(last.entry, symbol)} · Stop {fmt_price(last.stop, symbol)} · Alvo 1 {fmt_price(last.target1, symbol)} · Alvo 2 {fmt_price(last.target2, symbol)}'
     else:
         title, cls, desc = '🟡 AGUARDAR', 'wait', 'A última vela não gerou um novo sinal completo; não significa que o preço vá ficar parado.'
     st.markdown(f'<div class="signal {cls}"><strong>{title}</strong><div class="signal-detail">{desc}</div><div class="smallmeta">Última vela fechada: {format_lisbon(latest_close)} · Hora de Lisboa</div></div>', unsafe_allow_html=True)
 
     if interval_selection in ('15 minutos', '30 minutos'):
-        draw_chart(d, f'Evolução · {minutes} minutos', show_signals)
+        draw_chart(d, f'{symbol} · {minutes} minutos', show_signals, symbol)
     elif interval_selection == '1 hora':
         from strategy import ema, rsi_wilder
         h = d[['open', 'high', 'low', 'close']].resample('1h').agg({
@@ -174,21 +175,21 @@ def render_dashboard():
         h['ema20'] = ema(h.close, 20)
         h['ema50'] = ema(h.close, 50)
         h['rsi'] = rsi_wilder(h.close)
-        draw_chart(h, 'Evolução · 1 hora', False)
+        draw_chart(h, f'{symbol} · 1 hora', False, symbol)
         st.caption('Gráfico de 1h agregado a partir de velas de 15m fechadas. A tendência dos sinais usa EMA50 e EMA200 de 1h.')
     else:
         try:
-            d5 = last_closed_candles(load_quotes(key, '5min', 400), 5)
+            d5 = last_closed_candles(load_quotes(key, '5min', 400, symbol), 5)
             if len(d5) >= 50:
                 from strategy import ema
                 d5['ema20'] = ema(d5.close, 20)
                 d5['ema50'] = ema(d5.close, 50)
-            draw_chart(d5, 'Evolução · 5 minutos (visualização)', False)
+            draw_chart(d5, f'{symbol} · 5 minutos (visualização)', False, symbol)
             st.caption('Os sinais são calculados separadamente em 15m e 30m; o gráfico de 5m serve para acompanhar o preço.')
         except (DataFeedError, ValueError) as exc:
             st.warning(f'Não foi possível carregar 5 minutos: {exc}')
 
-    st.subheader(f'Últimas oportunidades identificadas · {minutes} minutos')
+    st.subheader(f'Últimas oportunidades {symbol} · {minutes} minutos')
     signals = recent_opportunities(d)
     if signals.empty:
         st.info('Ainda não foram identificados sinais no histórico disponível. O sistema continua a analisar.')
@@ -198,10 +199,10 @@ def render_dashboard():
             records.append({
                 'Hora (Lisboa)': format_lisbon(ts + pd.Timedelta(minutes=minutes)),
                 'Sinal': row.signal,
-                'Entrada': fmt_price(row.entry),
-                'Stop-loss': fmt_price(row.stop),
-                'Alvo 1': fmt_price(row.target1),
-                'Alvo 2': fmt_price(row.target2),
+                'Entrada': fmt_price(row.entry, symbol),
+                'Stop-loss': fmt_price(row.stop, symbol),
+                'Alvo 1': fmt_price(row.target1, symbol),
+                'Alvo 2': fmt_price(row.target2, symbol),
                 'RSI': round(float(row.rsi), 1),
             })
         st.dataframe(pd.DataFrame(records), use_container_width=True, hide_index=True)

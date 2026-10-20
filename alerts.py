@@ -1,4 +1,4 @@
-"""Verificação agendada, deduplicação por vela e envio Telegram."""
+"""Verificar oportunidades dos dois pares, alertar pelo Telegram e evitar repetidos."""
 from __future__ import annotations
 import argparse
 import json
@@ -7,7 +7,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 import requests
 import pandas as pd
-from datafeed import get_candles, DataFeedError
+
+from datafeed import get_candles, DataFeedError, SUPPORTED_PAIRS
 from strategy import aggregate_30m, calculate_signals, last_closed_candles, telegram_message
 
 STATE_PATH = Path('.state/last_signals.json')
@@ -23,110 +24,92 @@ def send_telegram(token: str, chat_id: str, message: str) -> None:
             timeout=20,
         )
         resp.raise_for_status()
-        body = resp.json()
-        if not body.get('ok'):
-            raise RuntimeError('Telegram recusou a mensagem. Verifica bot e chat_id.')
-    except requests.RequestException as exc:
-        # Não imprimir URL/token de pedidos que falhem.
+        if not resp.json().get('ok'):
+            raise RuntimeError('O Telegram recusou a mensagem; verifica bot e chat_id.')
+    except requests.RequestException:
+        # Não imprimir endereços que possam conter o token do Telegram.
         raise RuntimeError('Falha na comunicação com o Telegram.') from None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--test-telegram', action='store_true', help='Envia uma mensagem de teste')
-    args = parser.parse_args()
-    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
-    chat = os.getenv('TELEGRAM_CHAT_ID', '')
-
-    if args.test_telegram:
-        send_telegram(token, chat, '✅ Teste GBP/JPY: avisos Telegram configurados. Não é um sinal de trading.')
-        print('Teste enviado.')
-        return 0
-
-    secret = os.getenv('TWELVE_DATA_API_KEY', '')
-    market = get_candles(secret, '15min', 1500)
-    closed = last_closed_candles(market)
-    if len(closed) < 1000:
-        print('Ainda não existem velas fechadas suficientes; não enviámos alertas.')
-        return 0
-    frames = {
-        15: calculate_signals(closed, minutes=15),
-        30: calculate_signals(aggregate_30m(closed), minutes=30),
-    }
-    now = pd.Timestamp(datetime.now(timezone.utc))
-
-    old = {'notified': []}
+def read_state() -> set[str]:
     if STATE_PATH.exists():
         try:
-            old = json.loads(STATE_PATH.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
+            return set(json.loads(STATE_PATH.read_text(encoding='utf-8')).get('notified', []))
+        except (OSError, ValueError, TypeError):
             pass
-    old_ids = set(old.get('notified', []))
+    return set()
 
-    # Monitoriza as duas escalas; recupera até 45 minutos de sinais ainda recentes.
-    # A chave inclui timeframe para evitar confusões entre alertas 15m e 30m.
-    new_signals = []
+
+def save_state(ids: set[str]) -> None:
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(json.dumps({'notified': sorted(ids)}, indent=2), encoding='utf-8')
+
+
+def fresh_signals(key: str, symbol: str, now: pd.Timestamp, seen: set[str]):
+    market = get_candles(key, '15min', 1500, symbol=symbol)
+    closed = last_closed_candles(market)
+    if len(closed) < 1000:
+        print(f'{symbol}: sem velas fechadas suficientes; sem alertas.')
+        return []
+    frames = {
+        15: calculate_signals(closed, minutes=15, symbol=symbol),
+        30: calculate_signals(aggregate_30m(closed), minutes=30, symbol=symbol),
+    }
+    found = []
     for minutes, frame in frames.items():
         latest_close = frame.index[-1] + pd.Timedelta(minutes=minutes)
         if now - latest_close > pd.Timedelta(minutes=45):
-            print(f'{minutes}m: dados atrasados; sem alertas neste intervalo.')
+            print(f'{symbol} {minutes}m: cotação atrasada; sem alertas.')
             continue
         for ts, row in frame.tail(4).iterrows():
-            candle_close = ts + pd.Timedelta(minutes=minutes)
-            age = now - candle_close
+            age = now - (ts + pd.Timedelta(minutes=minutes))
             if age < pd.Timedelta(0) or age > pd.Timedelta(minutes=45):
                 continue
             if row.signal not in ('COMPRA', 'VENDA'):
                 continue
-            ident = f'{minutes}m:{row.signal}:{ts.isoformat()}'
-            if ident not in old_ids:
-                new_signals.append((ident, ts, row, minutes))
+            base = f'{minutes}m:{row.signal}:{ts.isoformat()}'
+            ident = f'{symbol}:{base}'
+            # Reconhecer identificadores usados pela versão antiga do GBP/JPY.
+            if ident in seen or (symbol == 'GBP/JPY' and base in seen):
+                continue
+            found.append((ident, ts, row, minutes, symbol))
+    return found
 
-    new_signals.sort(key=lambda item: (item[1] + pd.Timedelta(minutes=item[3]), item[3]))
-    for ident, ts, row, minutes in new_signals:
-        send_telegram(token, chat, telegram_message(ts, row, minutes=minutes))
-        old_ids.add(ident)
-        # Persistir após cada envio para reduzir repetição em caso de falha posterior.
-        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps({'notified': sorted(old_ids)[-200:]}, indent=2), encoding='utf-8')
-        print(f'Enviado: {ident}')
 
-    if not new_signals:
-        print('Sem novos sinais de 15m ou 30m. Nenhuma mensagem enviada.')
-    return 0
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test-telegram', action='store_true', help='Envia um teste; não é sinal')
+    args = parser.parse_args()
+    token = os.getenv('TELEGRAM_BOT_TOKEN', '')
+    chat = os.getenv('TELEGRAM_CHAT_ID', '')
+    if args.test_telegram:
+        send_telegram(token, chat, '✅ Radar FX: Telegram configurado para GBP/JPY + EUR/USD (COMPRA/VENDA, 15m/30m). Isto não é um sinal.')
+        print('Teste enviado para GBP/JPY e EUR/USD.')
+        return 0
 
-    old = {'notified': []}
-    if STATE_PATH.exists():
+    key = os.getenv('TWELVE_DATA_API_KEY', '')
+    now = pd.Timestamp(datetime.now(timezone.utc))
+    seen = read_state()
+    pending = []
+    errors = []
+    for symbol in SUPPORTED_PAIRS:
         try:
-            old = json.loads(STATE_PATH.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            pass
-    old_ids = set(old.get('notified', []))
+            pending.extend(fresh_signals(key, symbol, now, seen))
+        except (DataFeedError, ValueError, IndexError) as exc:
+            print(f'Erro de dados em {symbol}: {exc}')
+            errors.append(symbol)
 
-    # Processa até três velas recentemente fechadas: tolera atrasos de execução.
-    fresh = frame.tail(3)
-    new_signals = []
-    for ts, row in fresh.iterrows():
-        candle_close = ts + pd.Timedelta(minutes=15)
-        if now - candle_close > pd.Timedelta(minutes=45):
-            continue
-        if row.signal not in ('COMPRA', 'VENDA'):
-            continue
-        ident = f'{row.signal}:{ts.isoformat()}'
-        if ident not in old_ids:
-            new_signals.append((ident, ts, row))
-
-    for ident, ts, row in new_signals:
-        send_telegram(token, chat, telegram_message(ts, row))
-        old_ids.add(ident)
+    pending.sort(key=lambda x: (x[1] + pd.Timedelta(minutes=x[3]), x[4], x[3]))
+    for ident, ts, row, minutes, symbol in pending:
+        send_telegram(token, chat, telegram_message(ts, row, minutes=minutes, symbol=symbol))
+        seen.add(ident)
+        save_state(seen)
         print(f'Enviado: {ident}')
-
-    if new_signals:
-        STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        STATE_PATH.write_text(json.dumps({'notified': sorted(old_ids)[-160:]}, indent=2), encoding='utf-8')
-    else:
-        print('Sem novos sinais. Nenhuma mensagem enviada.')
-    return 0
+    if not pending:
+        print('Sem novos sinais de compra/venda para GBP/JPY ou EUR/USD.')
+    # Permitir que um par continue a alertar mesmo que a API falhe no outro.
+    # Se ambos falharem, marcar a execução como erro para diagnóstico no GitHub.
+    return 1 if len(errors) == len(SUPPORTED_PAIRS) else 0
 
 
 if __name__ == '__main__':

@@ -10,7 +10,8 @@ import numpy as np
 import pandas as pd
 
 LISBON = ZoneInfo('Europe/Lisbon')
-PIP = 0.01  # GBP/JPY: 1 pip = 0,01 JPY
+PIP = 0.01  # Compatibilidade GBP/JPY
+PIPS = {'GBP/JPY': 0.01, 'EUR/USD': 0.0001}
 
 
 def last_closed_candles(ohlc: pd.DataFrame, minutes: int = 15, now=None) -> pd.DataFrame:
@@ -60,8 +61,11 @@ def aggregate_30m(source: pd.DataFrame) -> pd.DataFrame:
     return bars.loc[count == 2].copy()
 
 
-def calculate_signals(source: pd.DataFrame, minutes: int = 15) -> pd.DataFrame:
+def calculate_signals(source: pd.DataFrame, minutes: int = 15, symbol: str = 'GBP/JPY') -> pd.DataFrame:
     """Sinais de 15m ou 30m com confirmação de 1h apenas após fecho da hora."""
+    if symbol not in PIPS:
+        raise ValueError('Par de moedas não suportado.')
+    pip = PIPS[symbol]
     if minutes not in (15, 30):
         raise ValueError('Os sinais usam velas de 15 ou 30 minutos.')
     min_bars = 1000 if minutes == 15 else 500
@@ -137,8 +141,8 @@ def calculate_signals(source: pd.DataFrame, minutes: int = 15) -> pd.DataFrame:
     d.loc[bearish, 'signal'] = 'VENDA'
 
     # Stops e alvos de referência baseados em ATR; spread e slippage excluídos.
-    d['stop_pips'] = (1.8 * d.atr / PIP).clip(lower=12)
-    d['stop_distance'] = d.stop_pips * PIP
+    d['stop_pips'] = (1.8 * d.atr / pip).clip(lower=12)
+    d['stop_distance'] = d.stop_pips * pip
     d['entry'] = d.close
     d['stop'] = np.where(bullish, d.close - d.stop_distance,
                         np.where(bearish, d.close + d.stop_distance, np.nan))
@@ -153,8 +157,10 @@ def recent_opportunities(d: pd.DataFrame, *, lookback_bars: int = 80) -> pd.Data
     return d[d.signal.ne('AGUARDAR')].tail(lookback_bars).copy()
 
 
-def fmt_price(number: float) -> str:
-    return f'{float(number):.3f}'
+def fmt_price(number: float, symbol: str = 'GBP/JPY') -> str:
+    if symbol not in PIPS:
+        raise ValueError('Par não suportado.')
+    return f'{float(number):.3f}' if symbol == 'GBP/JPY' else f'{float(number):.5f}'
 
 
 def format_lisbon(index: pd.Timestamp) -> str:
@@ -162,15 +168,15 @@ def format_lisbon(index: pd.Timestamp) -> str:
     return ts.tz_convert(LISBON).strftime('%d/%m/%Y %H:%M')
 
 
-def telegram_message(ts: pd.Timestamp, row: pd.Series, minutes: int = 15) -> str:
+def telegram_message(ts: pd.Timestamp, row: pd.Series, minutes: int = 15, symbol: str = 'GBP/JPY') -> str:
     emoji = '🟢' if row.signal == 'COMPRA' else '🔴'
     return (
-        f'{emoji} GBP/JPY — POSSÍVEL {row.signal} ({minutes}m)\n'
+        f'{emoji} {symbol} — POSSÍVEL {row.signal} ({minutes}m)\n'
         f'Fecho da vela (Lisboa): {format_lisbon(ts + pd.Timedelta(minutes=minutes))}\n'
-        f'Entrada de referência: {fmt_price(row.entry)}\n'
-        f'Stop-loss: {fmt_price(row.stop)} ({row.stop_pips:.0f} pips)\n'
-        f'Alvo 1 (1,5R): {fmt_price(row.target1)}\n'
-        f'Alvo 2 (2,0R): {fmt_price(row.target2)}\n'
+        f'Entrada de referência: {fmt_price(row.entry, symbol)}\n'
+        f'Stop-loss: {fmt_price(row.stop, symbol)} ({row.stop_pips:.0f} pips)\n'
+        f'Alvo 1 (1,5R): {fmt_price(row.target1, symbol)}\n'
+        f'Alvo 2 (2,0R): {fmt_price(row.target2, symbol)}\n'
         f'RSI {minutes}m: {row.rsi:.1f} | Tendência 1h: {row.trend}\n\n'
         '⚠️ Sinal técnico, não ordem. Confirma spread, notícias e risco antes de entrar. '
         'Os preços podem variar face à tua corretora.'
