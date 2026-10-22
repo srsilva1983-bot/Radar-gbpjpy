@@ -37,5 +37,7 @@
     "GBP/JPY:30m:COMPRA:2026-10-22T00:00:00+00:00"
   ],
   "last_summary_utc": "2026-10-22T03:13:50.845909+00:00",
-  "movement_alerts": {}
+  "movement_alerts": {
+    "GBP/JPY": "DESCIDA"
+  }
 }
